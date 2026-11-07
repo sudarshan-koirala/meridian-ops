@@ -1,0 +1,15 @@
+command:
+- uv
+- run
+- start-server
+env:
+- name: MLFLOW_TRACKING_URI
+  value: databricks
+- name: MLFLOW_EXPERIMENT_ID
+  value: '660845829392189'
+- name: PIP_INDEX_URL
+  value: https://pypi.org/simple/
+- name: UV_INDEX_URL
+  value: https://pypi.org/simple/
+- name: UV_DEFAULT_INDEX
+  value: https://pypi.org/simple/

@@ -1,0 +1,22 @@
+schema_version = 1
+
+[agent]
+framework = "langgraph"
+server = "agentbricks"
+deployment_name = "meridian-ops"
+
+[tracing]
+experiment_name = "/Shared/agentbricks_traces/meridian-ops-uwpqap"
+[[tools]]
+id = "accounts_analyst"
+auth = "user"
+source = {kind = "genie_agent", space_id = "01f1daf00a7e123b9935c9d94fb85f95"}
+[[tools]]
+id = "support_analyst"
+auth = "user"
+source = {kind = "genie_agent", space_id = "01f1daf0a906112da4fa9b2e7212e500"}
+[[tools]]
+id = "policy_reader"
+auth = "user"
+source = {kind = "sandbox", service = "system.ai.sandbox"}
+policy = {databricks_access_token_included = true}
