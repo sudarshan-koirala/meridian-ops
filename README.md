@@ -1,144 +1,221 @@
-# LangGraph agent template
+# Meridian Ops: a team of AI agents on Databricks
 
-A LangGraph agent served by `databricks_agentkit.DurableAgentServer`. The managed runtime keeps invocation state and events in
-memory during `agentbricks dev`. Deployment attaches a persistent Runtime Store, so invocation state and
-events survive process loss and interrupted work can be recovered.
+Meridian Labs is a made-up software company. It is losing customers in the APAC region, and nobody knows why.
 
-The generated project separates portable agent execution from the managed HTTP protocol:
+This project builds a small AI team that finds the answer:
+
+- **Ops Lead** (the main agent): reads your question, asks the right helpers, and writes one short report.
+- **Accounts Analyst**: answers questions about customers, plans, regions, monthly revenue and lost customers.
+- **Support Analyst**: answers questions about support tickets, reply times and customer ratings.
+- **Policy Reader**: runs a little Python code to read the company's support policy document.
+
+You ask one question. The Ops Lead calls all three helpers and tells you what to fix first.
 
 ```text
-client -> runtime/main.py -> runtime/adapter.py -> agent/agent.py:run_agent
+Why are we losing customers in APAC? Check accounts, support tickets and our SLA policy, then tell me what to fix first.
 ```
 
-- `agent/agent.py` owns the framework-native agent, sessions, tools, MCP lifetime, and `run_agent`.
-- `runtime/adapter.py` owns the agent-author integration hooks: runtime input/output translation plus
-  `invoke` and `recover`.
-- `runtime/main.py` constructs the server and registers those hooks.
+## What is in this repo
 
-To bring an existing LangGraph agent, run `agentbricks init --framework langgraph --existing .` in its
-project and follow the generated prompt in your coding agent. The migration skill and this template share
-[AGENTKIT_CONTRACT.md](AGENTKIT_CONTRACT.md), which owns integration requirements. This README owns
-configuration and client examples; [AGENTS.md](AGENTS.md) provides the development map.
+| Folder or file | What it is |
+| --- | --- |
+| `data/meridian_accounts.csv` | 100 customer accounts (25 per region) |
+| `data/meridian_support_tickets.csv` | 120 support tickets |
+| `data/Meridian-Support-SLA-Policy.pdf` | The support policy (the promised reply times) |
+| `data/Meridian-Support-SLA-Policy.md` | The same policy as plain text, so the agent can read it easily |
+| `agent/agent.py` | The Ops Lead and its instructions (`SYSTEM_PROMPT`) |
+| `agent.toml` | The list of helpers the Ops Lead can call |
 
-## Run locally
+## What you need
+
+- A Databricks workspace. The free Free Edition works for trying it on your computer. To put it online (step 7), you need a trial or paid workspace.
+- The Databricks command line tool. Check it with `databricks --version`.
+- `uv` with Python 3.12. Install Python with `uv python install 3.12`.
+- In your workspace: Genie turned on and one SQL warehouse running (2X-Small is enough on Free Edition).
+
+## Step 1: Load the data
+
+In your Databricks workspace, open a SQL editor and run:
+
+```sql
+CREATE SCHEMA IF NOT EXISTS mycatalog.meridian_labs;
+CREATE VOLUME IF NOT EXISTS mycatalog.meridian_labs.policies;
+```
+
+Then, in **Catalog**:
+
+1. Upload `data/meridian_accounts.csv` as a table named `meridian_accounts`.
+2. Upload `data/meridian_support_tickets.csv` as a table named `meridian_support_tickets`.
+3. Upload both policy files (`.pdf` and `.md`) into the `policies` volume.
+
+If you already have older Meridian tables there, replace them with these files. Otherwise your numbers will not match the ones below.
+
+> **Your catalog may not be called `mycatalog`.** Free Edition often uses `workspace`. If yours is different, change the name everywhere: in the SQL above, in `SYSTEM_PROMPT` in `agent/agent.py`, and in every `dbfs:/Volumes/...` path.
+
+## Step 2: Build the two analysts with Genie
+
+Create two Genie Agents in your workspace:
+
+- **Accounts Analyst**, using the `meridian_accounts` table.
+- **Support Analyst**, using the `meridian_support_tickets` table.
+
+Test each one with a question:
+
+```text
+[Accounts Analyst] What is the churn rate by region? Show it as a percent.
+[Support Analyst]  What is the average first response time in hours by region?
+```
+
+Copy the ID of each one from its **Settings** tab. It is a 32-character code of numbers and lowercase letters. You need both IDs in step 4.
+
+## Step 3: Install the Agent Bricks tool and sign in
+
+```bash
+uv tool install --python 3.12 databricks-agentbricks
+agentbricks --version
+
+databricks auth login --host "https://<your-workspace-url>" --profile my-workspace
+agentbricks login --profile my-workspace
+```
+
+If you are starting from scratch instead of from this repo, create the project with:
+
+```bash
+agentbricks init --framework langgraph meridian-ops
+cd meridian-ops
+```
+
+## Step 4: Connect the helpers
+
+Put your two Genie IDs from step 2 in place of the brackets:
+
+```bash
+agentbricks tools add genie-agent [ACCOUNTS_SPACE_ID] --name accounts_analyst
+agentbricks tools add genie-agent [SUPPORT_SPACE_ID] --name support_analyst
+agentbricks tools add sandbox --name policy_reader
+```
+
+This repo's `agent.toml` already lists these helpers, but with the IDs from the original workspace. Replace them with yours.
+
+Do **not** add `--scope` or `--permission` to the sandbox command. It does not support them, and the agent will not start. The sandbox uses your own access rights.
+
+## Step 5: Tell the Ops Lead how to work
+
+The instructions live in `SYSTEM_PROMPT` in `agent/agent.py`. They are already filled in:
+
+```text
+You are the Meridian Labs Ops Lead. You manage a team of specialists.
+Never guess numbers. Always ask a specialist.
+
+Your team:
+- accounts_analyst: customers, tiers, regions, MRR and churn.
+- support_analyst: support tickets, first response times and CSAT.
+- sandbox (create_sandbox / run_code / delete_sandbox): runs Python to read policy files.
+  /Volumes is NOT mounted in the sandbox. Do not use open() or os.listdir() on /Volumes.
+  Read the SLA policy with the Databricks CLI, which is already signed in:
+    import subprocess
+    r = subprocess.run(["databricks", "fs", "cat",
+        "dbfs:/Volumes/mycatalog/meridian_labs/policies/Meridian-Support-SLA-Policy.md"],
+        capture_output=True, text=True)
+    print(r.stdout or r.stderr)
+  Call delete_sandbox when you are done.
+
+Rules:
+1. If a question touches more than one area, call every specialist you need.
+2. Combine their answers into one short report.
+3. Say which specialist gave which fact.
+4. End with the top 3 actions, most important first.
+```
+
+## Step 6: Try it on your computer
 
 ```bash
 agentbricks dev
 ```
 
-The API is available at `http://localhost:8000/api/invocations`. Every request supplies a UUID `id`.
-That ID is the invocation identifier and idempotency key. Supply the stable application session as
-the top-level `session_id`; agent-specific values live inside the opaque `input` object:
+Open http://localhost:8000 and ask:
+
+```text
+Which region has the highest churn?
+```
+
+```text
+Why are we losing customers in APAC? Check accounts, support tickets and our SLA policy, then tell me what to fix first.
+```
+
+Follow-up:
+
+```text
+Which APAC accounts had two or more SLA breaches? They should be on the churn-risk watch list.
+```
+
+The first run is slow because it installs everything. Later runs are fast.
+
+### What you should see
+
+- **Lost customers:** APAC 40.0%. North America, Europe and LATAM 12.0% each.
+- **Average first reply:** APAC 11.9 hours. North America 2.8, Europe 2.8, LATAM 2.5.
+- **Customer rating (1 to 5):** APAC 2.16. Other regions 3.96 to 4.30.
+- **First replies later than promised:** APAC 80.0%. All other regions 0.0%.
+- **The reason**, from section 3 of the policy: APAC tickets go to the Europe team. That team starts at 08:00 Central European Time. There is no APAC team until Q2 2027.
+
+## Step 7: Put it online and share it
+
+This step needs a trial or paid workspace. It does not work on Free Edition. If you built steps 1 to 4 on Free Edition, sign in to the other workspace with `agentbricks login --profile <profile>` and repeat steps 1 to 4 there. Keep your `agent/agent.py`.
 
 ```bash
-SESSION_ID=$(uuidgen)
-INVOCATION_ID=$(uuidgen)
-
-curl -sS http://localhost:8000/api/invocations \
-  -H 'Content-Type: application/json' \
-  -d "{\"id\":\"$INVOCATION_ID\",\"session_id\":\"$SESSION_ID\",\"input\":{\"messages\":[{\"role\":\"user\",\"content\":\"What time is it? Use your tool.\"}]}}"
+agentbricks deploy meridian-ops
+agentbricks deployments list
 ```
 
-Reuse `SESSION_ID` for multi-turn conversation state. Generate a new `INVOCATION_ID` for each turn.
-Retrying the same request with the same invocation ID returns the persisted result; changing the
-request while reusing the ID returns `409`.
+The name can be at most 17 characters. `meridian-ops` has 12.
 
-## Invocation modes
+## If the answer is not right
 
-- Foreground: omit `background` and `stream`; the response contains the agent result under `output`.
-- Foreground streaming: set `stream: true`; the response is SSE backed by persisted events.
-- Background: set `background: true`; poll the returned `status_url`.
-- Background streaming: set both flags; the `202` response includes `status_url` and `events_url`.
+**The Ops Lead does not ask all three helpers:**
+
+```text
+Use accounts_analyst, support_analyst and the sandbox to explain why APAC churn is high. Read the SLA policy in the sandbox. Call all three before you answer.
+```
+
+**The Policy Reader cannot find or read the policy:**
+
+```text
+Use the sandbox. Run the Databricks CLI command: databricks fs cat dbfs:/Volumes/mycatalog/meridian_labs/policies/Meridian-Support-SLA-Policy.md and tell me what section 3 says about APAC.
+```
+
+Also check that the `.md` file is in the volume:
 
 ```bash
-INVOCATION_ID=$(uuidgen)
-curl -sN http://localhost:8000/api/invocations \
-  -H 'Content-Type: application/json' \
-  -d "{\"id\":\"$INVOCATION_ID\",\"session_id\":\"$SESSION_ID\",\"input\":{\"messages\":[{\"role\":\"user\",\"content\":\"Count to three.\"}]},\"stream\":true}"
-
-INVOCATION_ID=$(uuidgen)
-curl -sS http://localhost:8000/api/invocations \
-  -H 'Content-Type: application/json' \
-  -d "{\"id\":\"$INVOCATION_ID\",\"session_id\":\"$SESSION_ID\",\"input\":{\"messages\":[{\"role\":\"user\",\"content\":\"Summarize durable agents.\"}]},\"background\":true}" | jq
-curl -sS "http://localhost:8000/api/invocations/$INVOCATION_ID" | jq
+databricks fs ls dbfs:/Volumes/mycatalog/meridian_labs/policies/
 ```
 
-SSE records contain events translated by `runtime/adapter.py`: token `delta`s, completed `message`s,
-and HITL `interrupt`s. Replay from a cursor with
-`GET /api/invocations/{id}/events?after={sequence}`.
+**Genie gives averages instead of percents:**
 
-## Human approval
-
-`send_message` is gated by `HumanInTheLoopMiddleware`. Start a turn asking the agent to use that
-tool. When the output or event stream contains an `interrupt`, submit a new invocation with the same
-application session:
-
-```json
-{
-  "id": "<new-uuid>",
-  "session_id": "<same-session-id>",
-  "input": {
-    "resume": {"decisions": [{"type": "approve"}]}
-  }
-}
+```text
+What percent of accounts have status churned, grouped by region? Round to one decimal.
 ```
 
-The default checkpointer is process-local. Bind a managed Session Store to preserve multi-turn and
-paused LangGraph state across restarts:
+**You want a shorter question:**
 
-```bash
-agentbricks sessions bind my-agent-sessions
+```text
+What is going wrong in APAC, and what should we fix first?
 ```
 
-## Crash recovery
+## Common problems
 
-Deployment with a Runtime Store supports invocation recovery after worker loss. Graph checkpoint
-persistence requires a Session Store separately. Recovery can replay work, so tools must tolerate
-repeated side effects. See [Recovery and durability](AGENTKIT_CONTRACT.md#recovery-and-durability).
+| Problem | Fix |
+| --- | --- |
+| Install fails on an Intel Mac (`cryptography`) | `pip install --only-binary :all: databricks-agentbricks` |
+| `ToolManifestError ... declares policy.downscope` | Open `agent.toml`. Delete the `policy` / `downscope` lines from the sandbox block. Run `agentbricks dev` again. |
+| `[Errno 95] Operation not supported` on `/Volumes` | The sandbox cannot open volume files directly. The instructions in step 5 must tell it to use `databricks fs cat dbfs:/Volumes/...`. |
+| The sandbox finds no policy file | Run `databricks fs ls dbfs:/Volumes/<catalog>/meridian_labs/policies/` from your own terminal. If it is empty, upload the files with `databricks fs cp`. |
+| Memory shows "Not connected" during `agentbricks dev` | This is normal. Memory only connects after step 7. |
+| Genie says you are asking too often (Free Edition) | Wait one minute between big questions. |
+| Putting it online fails with `Scale-to-zero must be enabled for this workspace tier` | Free Edition does not allow this. Use a trial or paid workspace. |
+| Putting it online fails because of memory or saved chats | Run `agentbricks memory unbind && agentbricks sessions unbind`, then try again. |
+| Free Edition says you have too many apps (the limit is 3) | Delete the failed one: `agentbricks deployments delete agent-bricks-meridian-ops` |
 
-## Chat app
+## For developers
 
-The browser UI is included by default. It generates a stable application session ID in local
-storage, sends it as the top-level `session_id`, and generates a fresh invocation UUID per turn.
-Use `agentbricks init --framework langgraph --disable-chat-app` for API-only output.
-
-## Configure and deploy
-
-- Change the model, instructions, tools, graph, and framework-native execution in `agent/agent.py`.
-- Change `runtime/adapter.py` only to map a different application input/output contract.
-- Add local tools under `agent/tools/`; modules are auto-discovered.
-- Add MCP servers in `agent/mcps.py` or with `agentbricks tools add mcp`.
-- Bind long-term memory with `agentbricks memory bind <store>`.
-
-```bash
-agentbricks --profile <profile> deploy agent-langgraph --source .
-```
-
-When deployment provisions a dedicated Runtime Store, only the app-owned
-`databricks_agentkit_runtime_<hash>` schema and runtime tables are added. Managed Runtime Store
-deployments use their own default schema.
-
-To keep a session on one app replica (sticky routing), set the `X-Routing-Key` request header to your
-stable session id on every call. It is a routing hint only: non-blank, no more than 128 UTF-8 bytes,
-used verbatim, and it takes precedence over the legacy `__Host-databricks-app-router` cookie. It is not
-authentication and is never used as the application's session id. Send that separately as the
-top-level `session_id` in the request body.
-
-# Request-user authorization
-
-Declared tools in `agent.toml` select `auth = "user"` or `auth = "app"`; legacy missing auth
-continues to use the application/default identity. Deployed user tools require the request resolver
-and never fall back to application credentials. Model, memory-service, session-service, and custom
-MCP server credentials are unchanged.
-
-`runtime/main.py` derives the invocation policy after `configure()`. The runtime adapter namespaces
-public session IDs and actor values for the request owner, then passes only `workspace_client_for`
-to the framework-native agent. Internal session keys are never returned to clients.
-
-User-policy invocations use the existing Runtime for synchronous, streaming, and background calls,
-including status polling, event replay, and invocation-ID idempotency. The Runtime Store persists no
-credential; request-user authentication remains process-local for the active first attempt. A
-replacement attempt fails with `MCP_USER_AUTH_RECOVERY_UNSUPPORTED` before agent code runs. Approval
-interruptions remain unsupported and fail with `MCP_USER_AUTH_HITL_UNSUPPORTED`. The agent's
-existing namespaced memory, conversation store, and checkpointer behavior is unchanged; OBO does not
-add another saver.
+The details of how the code fits together are in [AGENTS.md](AGENTS.md) and [AGENTKIT_CONTRACT.md](AGENTKIT_CONTRACT.md). Run the tests with `uv run pytest`.
